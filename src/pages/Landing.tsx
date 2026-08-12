@@ -43,25 +43,6 @@ export default function Landing({ onNavigate }: LandingProps) {
         </div>
       </section>
 
-      {/* Stats */}
-      <section className="border-y border-slate-100 bg-slate-25">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-          <dl className="grid grid-cols-2 lg:grid-cols-4 gap-8">
-            {[
-              { value: '1,200+', label: 'Students served' },
-              { value: '340', label: 'Active tutors' },
-              { value: '18', label: 'Subjects covered' },
-              { value: '94%', label: 'Satisfaction rate' },
-            ].map(stat => (
-              <div key={stat.label} className="text-center">
-                <dt className="font-display font-bold text-3xl text-slate-900">{stat.value}</dt>
-                <dd className="mt-1 text-sm text-slate-500">{stat.label}</dd>
-              </div>
-            ))}
-          </dl>
-        </div>
-      </section>
-
       {/* How it works */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20">
         <div className="text-center mb-12">
