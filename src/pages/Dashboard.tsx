@@ -167,6 +167,7 @@ export default function Dashboard() {
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [matchSuccess, setMatchSuccess] = useState<{ student: string; tutor: string } | null>(null);
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
+  const lastUpdated = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const [assigningRequestIds, setAssigningRequestIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -440,7 +441,7 @@ export default function Dashboard() {
               <p className="mt-0.5 text-sm text-slate-500">Manage requests, tutors, and matches</p>
             </div>
             <span className="text-xs text-slate-400 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
-              Last updated: Feb 8, 2026
+              Last updated: {lastUpdated}
             </span>
           </div>
 
