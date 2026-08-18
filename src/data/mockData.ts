@@ -1,6 +1,6 @@
 export type Subject = string;
 export type RequestStatus = 'unmatched' | 'matched' | 'pending';
-export type TutorStatus = 'active' | 'inactive' | 'pending';
+export type TutorStatus = 'active' | 'inactive' | 'pending' | 'accepted' | 'rejected';
 
 export interface TimeSlot {
   day: string;

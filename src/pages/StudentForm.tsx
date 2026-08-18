@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { supabase } from '../lib/supabase';
 import { SUBJECTS, GRADE_LEVELS, type TimeSlot } from '../data/mockData';
 import AvailabilityPicker from '../components/AvailabilityPicker';
 
@@ -8,9 +9,12 @@ interface StudentFormProps {
 
 export default function StudentForm({ onNavigate }: StudentFormProps) {
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [form, setForm] = useState({
     name: '',
     email: '',
+    phone: '',
     subject: '',
     gradeLevel: '',
     availability: [] as TimeSlot[],
@@ -29,10 +33,42 @@ export default function StudentForm({ onNavigate }: StudentFormProps) {
     return e;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const e2 = validate();
-    if (Object.keys(e2).length > 0) { setErrors(e2); return; }
+    if (Object.keys(e2).length > 0) {
+      setErrors(e2);
+      return;
+    }
+
+    setSubmitting(true);
+    setSubmitError('');
+
+    const payload = {
+      name: form.name.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim() || null,
+      grade_level: form.gradeLevel,
+      subject: form.subject,
+      availability: form.availability.map(slot => ({
+        day: slot.day,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        timezone: form.timezone,
+      })),
+      additional_info: form.description.trim() || null,
+    };
+
+    const { error } = await supabase.from('student_requests').insert(payload);
+
+    setSubmitting(false);
+
+    if (error) {
+      console.error('Supabase student request insert error:', error);
+      setSubmitError('Unable to submit your request right now. Please try again in a moment.');
+      return;
+    }
+
     setSubmitted(true);
   };
 
@@ -115,6 +151,22 @@ export default function StudentForm({ onNavigate }: StudentFormProps) {
             {errors.email && <p className="mt-1 text-xs text-rose-600">{errors.email}</p>}
           </div>
 
+          {/* Phone */}
+          <div>
+            <label htmlFor="phone" className="block text-sm font-medium text-slate-700 mb-1.5">
+              Phone number <span className="text-slate-400 text-xs">(optional)</span>
+            </label>
+            <input
+              id="phone"
+              type="tel"
+              autoComplete="tel"
+              value={form.phone}
+              onChange={e => setForm(p => ({ ...p, phone: e.target.value }))}
+              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 hover:border-slate-300 focus:border-blue-500 text-sm text-slate-900 placeholder-slate-400 transition-colors"
+              placeholder="(123) 456-7890"
+            />
+          </div>
+
           {/* Subject + Grade level */}
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
@@ -181,10 +233,12 @@ export default function StudentForm({ onNavigate }: StudentFormProps) {
 
           <button
             type="submit"
-            className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-3 rounded-xl transition-colors"
+            disabled={submitting}
+            className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-3 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Submit request
+            {submitting ? 'Submitting…' : 'Submit request'}
           </button>
+          {submitError && <p className="mt-3 text-sm text-rose-600">{submitError}</p>}
         </form>
       </div>
     </div>

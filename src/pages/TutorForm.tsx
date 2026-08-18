@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { supabase } from '../lib/supabase';
 import { SUBJECTS, type TimeSlot } from '../data/mockData';
 import AvailabilityPicker from '../components/AvailabilityPicker';
 
@@ -8,6 +9,8 @@ interface TutorFormProps {
 
 export default function TutorForm({ onNavigate }: TutorFormProps) {
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -37,10 +40,38 @@ export default function TutorForm({ onNavigate }: TutorFormProps) {
     return e;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const e2 = validate();
     if (Object.keys(e2).length > 0) { setErrors(e2); return; }
+
+    setSubmitting(true);
+    setSubmitError('');
+
+    const payload = {
+      name: form.name.trim(),
+      email: form.email.trim(),
+      phone: form.phone.trim() || null,
+      subjects: form.subjects,
+      bio: form.bio.trim() || null,
+      availability: form.availability.map(slot => ({
+        day: slot.day,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        timezone: form.timezone,
+      })),
+    };
+
+    const { error } = await supabase.from('tutors').insert(payload);
+
+    setSubmitting(false);
+
+    if (error) {
+      console.error('Supabase tutor insert error:', error);
+      setSubmitError('Unable to submit your application right now. Please try again in a moment.');
+      return;
+    }
+
     setSubmitted(true);
   };
 
@@ -216,10 +247,12 @@ export default function TutorForm({ onNavigate }: TutorFormProps) {
 
           <button
             type="submit"
-            className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-3 rounded-xl transition-colors"
+            disabled={submitting}
+            className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-3 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Submit application
+            {submitting ? 'Submitting…' : 'Submit application'}
           </button>
+          {submitError && <p className="mt-3 text-sm text-rose-600">{submitError}</p>}
         </form>
       </div>
     </div>

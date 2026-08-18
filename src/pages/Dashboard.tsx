@@ -1,13 +1,41 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
 import {
-  mockRequests, mockTutors, computeOverlap,
-  type StudentRequest, type Tutor, type TimeSlot,
+  computeOverlap,
+  type StudentRequest,
+  type Tutor,
+  type TimeSlot,
 } from '../data/mockData';
 import { formatTime, formatSlot, TIMEZONES } from '../components/AvailabilityPicker';
 
 type Tab = 'requests' | 'tutors' | 'matching';
 type RequestStatus = StudentRequest['status'];
 type TutorStatus = Tutor['status'];
+
+type DbStudentRequest = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  grade_level: string;
+  subject: string;
+  availability: TimeSlot[] | null;
+  additional_info: string | null;
+  status: RequestStatus;
+  created_at: string;
+};
+
+type DbTutor = {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  subjects: string[] | null;
+  availability: TimeSlot[] | null;
+  bio: string | null;
+  status: TutorStatus;
+  created_at: string;
+};
 
 const STATUS_BADGE: Record<RequestStatus, string> = {
   unmatched: 'bg-amber-50 text-amber-700 border-amber-200',
@@ -23,12 +51,21 @@ const STATUS_LABEL: Record<RequestStatus, string> = {
 
 const TUTOR_STATUS_BADGE: Record<TutorStatus, string> = {
   active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  accepted: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   inactive: 'bg-slate-100 text-slate-500 border-slate-200',
   pending: 'bg-amber-50 text-amber-700 border-amber-200',
+  rejected: 'bg-rose-50 text-rose-700 border-rose-200',
 };
 
 function tzLabel(tz: string) {
   return TIMEZONES.find(t => t.value === tz)?.label ?? tz;
+}
+
+function normalizeRequestStatus(status: string): RequestStatus {
+  if (status === 'assigned') return 'matched';
+  if (status === 'closed') return 'unmatched';
+  if (status === 'pending') return 'pending';
+  return 'pending';
 }
 
 function initials(name: string) {
@@ -92,19 +129,146 @@ function OverlapPills({ overlaps }: { overlaps: Array<{ a: TimeSlot; b: TimeSlot
   );
 }
 
+// Compare two availability arrays and return overlapping slot pairs only when slot.timezone matches
+function computeOverlapWithTimezone(a: TimeSlot[], b: TimeSlot[]) {
+  const result: Array<{ a: TimeSlot; b: TimeSlot }> = [];
+  for (const sa of a) {
+    for (const sb of b) {
+      const saTz = (sa as any).timezone;
+      const sbTz = (sb as any).timezone;
+      if (saTz || sbTz) {
+        if (!saTz || !sbTz) continue;
+        if (saTz !== sbTz) continue;
+      }
+      if (sa.day !== sb.day) continue;
+      if (sa.startTime < sb.endTime && sb.startTime < sa.endTime) {
+        result.push({ a: sa, b: sb });
+      }
+    }
+  }
+  return result;
+}
+
 export default function Dashboard() {
   const [tab, setTab] = useState<Tab>('requests');
-  const [requests, setRequests] = useState<StudentRequest[]>(mockRequests);
-  const [tutors] = useState<Tutor[]>(mockTutors);
+  const [requests, setRequests] = useState<StudentRequest[]>([]);
+  const [tutors, setTutors] = useState<Tutor[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [userChecked, setUserChecked] = useState(false);
+  const [isCoordinator, setIsCoordinator] = useState(false);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [requestFilter, setRequestFilter] = useState<RequestStatus | 'all'>('all');
   const [tutorFilter, setTutorFilter] = useState<TutorStatus | 'all'>('all');
+  const [updatingTutorIds, setUpdatingTutorIds] = useState<string[]>([]);
+  const [updateError, setUpdateError] = useState('');
   const [searchRequests, setSearchRequests] = useState('');
   const [searchTutors, setSearchTutors] = useState('');
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   const [matchSuccess, setMatchSuccess] = useState<{ student: string; tutor: string } | null>(null);
+  const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
+  const [assigningRequestIds, setAssigningRequestIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    // Check auth state and coordinator membership first
+    const checkAuth = async () => {
+      setUserChecked(false);
+      setIsCoordinator(false);
+      setAuthUserId(null);
+
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser();
+
+      if (userErr || !user) {
+        // not signed in
+        setUserChecked(true);
+        setLoading(false);
+        return;
+      }
+
+      setAuthUserId(user.id);
+
+      // Check coordinators table for this user
+      const { data: coordData, error: coordErr } = await supabase
+        .from('coordinators')
+        .select('user_id,is_active')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (coordErr) {
+        console.error('Coordinator lookup error:', coordErr);
+        setLoadError('Unable to verify coordinator membership.');
+        setUserChecked(true);
+        setLoading(false);
+        return;
+      }
+
+      if (!coordData || !coordData.is_active) {
+        setIsCoordinator(false);
+        setUserChecked(true);
+        setLoading(false);
+        return;
+      }
+
+      setIsCoordinator(true);
+      setUserChecked(true);
+
+      // Now load actual dashboard data
+      setLoading(true);
+      setLoadError('');
+
+      const [requestsResponse, tutorsResponse] = await Promise.all([
+        supabase.from<DbStudentRequest>('student_requests')
+          .select('id,name,email,phone,grade_level,subject,availability,additional_info,status,created_at'),
+        supabase.from<DbTutor>('tutors')
+          .select('id,name,email,phone,subjects,availability,bio,status,created_at'),
+      ]);
+
+      if (requestsResponse.error || tutorsResponse.error) {
+        console.error('Dashboard Supabase read errors:', requestsResponse.error, tutorsResponse.error);
+        setLoadError('Unable to load dashboard data.');
+        setLoading(false);
+        return;
+      }
+
+      setRequests((requestsResponse.data ?? []).map(row => ({
+        id: row.id,
+        studentName: row.name,
+        email: row.email,
+        subject: row.subject,
+        gradeLevel: row.grade_level,
+        availability: row.availability ?? [],
+        timezone: row.availability?.[0]?.timezone ?? 'America/Chicago',
+        description: row.additional_info ?? '',
+        status: normalizeRequestStatus(row.status),
+        matchedTutorId: undefined,
+        submittedAt: row.created_at,
+      })));
+
+      setTutors((tutorsResponse.data ?? []).map(row => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        phone: row.phone ?? '',
+        subjects: row.subjects ?? [],
+        availability: row.availability ?? [],
+        timezone: row.availability?.[0]?.timezone ?? 'America/Chicago',
+        experience: 'Not specified',
+        bio: row.bio ?? '',
+        status: row.status,
+        joinedAt: row.created_at,
+      })));
+
+      setLoading(false);
+    };
+
+    checkAuth();
+  }, []);
 
   const openRequests = requests.filter(r => r.status === 'unmatched' || r.status === 'pending').length;
-  const activeTutors = tutors.filter(t => t.status === 'active').length;
+  const activeTutors = tutors.filter(t => t.status === 'accepted').length;
   const matches = requests.filter(r => r.status === 'matched').length;
 
   const filteredRequests = requests.filter(r => {
@@ -119,18 +283,49 @@ export default function Dashboard() {
     return true;
   });
 
+  const isUpdating = (id: string) => updatingTutorIds.includes(id);
+
+  const updateTutorStatus = async (id: string, newStatus: 'accepted' | 'rejected') => {
+    if (isUpdating(id)) return;
+    setUpdateError('');
+    setUpdatingTutorIds(prev => [...prev, id]);
+
+    try {
+      const { data, error } = await supabase
+        .from('tutors')
+        .update({ status: newStatus })
+        .eq('id', id)
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        console.error('Tutor status update error:', error);
+        setUpdateError('Unable to update tutor status. Please try again.');
+        return;
+      }
+
+      // Update local state
+      setTutors(prev => prev.map(t => t.id === id ? { ...t, status: (data as any)?.status ?? newStatus } : t));
+    } catch (err) {
+      console.error('Tutor status update exception:', err);
+      setUpdateError('Unable to update tutor status. Please try again.');
+    } finally {
+      setUpdatingTutorIds(prev => prev.filter(x => x !== id));
+    }
+  };
+
   const selectedRequest = requests.find(r => r.id === selectedRequestId);
 
   const eligibleTutors = selectedRequest
     ? tutors
-        .filter(t => t.status === 'active')
+        .filter(t => t.status === 'accepted')
         .map(t => ({
           tutor: t,
           subjectMatch: t.subjects.includes(selectedRequest.subject),
           overlaps: computeOverlap(selectedRequest.availability, t.availability),
         }))
         .filter(({ subjectMatch, overlaps }) => subjectMatch || overlaps.length > 0)
-        .sort((a, b) => {
+        .sort((a, b) => { 
           const scoreA = (a.subjectMatch ? 10 : 0) + a.overlaps.length;
           const scoreB = (b.subjectMatch ? 10 : 0) + b.overlaps.length;
           return scoreB - scoreA;
@@ -144,6 +339,94 @@ export default function Dashboard() {
     setMatchSuccess({ student: selectedRequest.studentName, tutor: tutor?.name ?? '' });
     setSelectedRequestId(null);
     setTimeout(() => setMatchSuccess(null), 4000);
+  };
+
+  const assignForRequest = (requestId: string, tutorId: string) => {
+    if (assigningRequestIds.includes(requestId)) return;
+    setUpdateError('');
+    if (!isCoordinator) {
+      setUpdateError('You must be signed in as an active coordinator to assign.');
+      return;
+    }
+
+    const req = requests.find(r => r.id === requestId);
+    if (!req) return;
+    const tutor = tutors.find(t => t.id === tutorId);
+
+    // Prevent duplicate submissions for this request
+    setAssigningRequestIds(prev => [...prev, requestId]);
+
+    (async () => {
+      let createdAssignmentId: string | null = null;
+      try {
+        // Get current authenticated user
+        const { data: userData, error: userErr } = await supabase.auth.getUser();
+        const currentUser = userData?.user ?? null;
+        if (userErr || !currentUser) {
+          console.error('No authenticated user for assignment:', userErr);
+          setUpdateError('You must be signed in to create an assignment.');
+          return;
+        }
+
+        // 1) Insert assignment row with assigned_by set to the current user's id
+        const { data: assignData, error: assignErr } = await supabase
+          .from('assignments')
+          .insert({ request_id: requestId, tutor_id: tutorId, assigned_by: currentUser.id })
+          .select()
+          .maybeSingle();
+
+        if (assignErr) {
+          console.error('Assignment insert error:', assignErr);
+          setUpdateError('Unable to create assignment. Please try again.');
+          return;
+        }
+
+        createdAssignmentId = (assignData as any)?.id ?? null;
+
+        // 2) Update request status to 'assigned'
+        const { data: reqData, error: reqErr } = await supabase
+          .from('student_requests')
+          .update({ status: 'assigned' })
+          .eq('id', requestId)
+          .select()
+          .maybeSingle();
+
+        if (reqErr) {
+          console.error('Student request update error after assignment:', reqErr);
+          setUpdateError('Assignment created but failed to update request status. Rolling back.');
+
+          // Rollback: delete the assignment we just created
+          if (createdAssignmentId) {
+            const { error: delErr } = await supabase
+              .from('assignments')
+              .delete()
+              .eq('id', createdAssignmentId);
+            if (delErr) console.error('Failed to rollback assignment delete:', delErr);
+          }
+
+          return;
+        }
+
+        // Success: update local UI
+        setRequests(prev => prev.map(r => r.id === requestId ? { ...r, status: normalizeRequestStatus('assigned'), matchedTutorId: tutorId } : r));
+        setMatchSuccess({ student: req.studentName, tutor: tutor?.name ?? '' });
+        setExpandedRequestId(null);
+        setTimeout(() => setMatchSuccess(null), 4000);
+      } catch (err) {
+        console.error('Assignment operation exception:', err);
+        setUpdateError('Unable to create assignment. Please try again.');
+        // Attempt rollback if needed
+        if ((err as any)?.createdAssignmentId) {
+          try {
+            await supabase.from('assignments').delete().eq('id', (err as any).createdAssignmentId);
+          } catch (delErr) {
+            console.error('Rollback delete exception:', delErr);
+          }
+        }
+      } finally {
+        setAssigningRequestIds(prev => prev.filter(x => x !== requestId));
+      }
+    })();
   };
 
   return (
@@ -195,6 +478,20 @@ export default function Dashboard() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {loading && (
+          <div className="mb-6 bg-white border border-slate-100 rounded-2xl p-6 text-slate-500">
+            Loading dashboard data…
+          </div>
+        )}
+        {loadError && !loading && (
+          <div className="mb-6 bg-rose-50 border border-rose-200 rounded-2xl p-6 text-rose-700">
+            <p className="font-semibold">Unable to load dashboard data.</p>
+            <p className="mt-1 text-sm text-rose-700/80">
+              Coordinator auth may be required before this page can read live data.
+            </p>
+          </div>
+        )}
+
         {/* Success toast */}
         {matchSuccess && (
           <div className="mb-6 flex items-center gap-3 bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-3.5 text-sm text-emerald-800" role="status">
@@ -252,6 +549,12 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {updateError && (
+              <div className="mb-4 bg-rose-50 border border-rose-200 rounded-2xl p-4 text-rose-700">
+                {updateError}
+              </div>
+            )}
+
             <div className="bg-white border border-slate-100 rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[680px]" aria-label="Student requests table">
@@ -273,7 +576,8 @@ export default function Dashboard() {
                     ) : filteredRequests.map(req => {
                       const matchedTutor = req.matchedTutorId ? tutors.find(t => t.id === req.matchedTutorId) : null;
                       return (
-                        <tr key={req.id} className="hover:bg-slate-25 transition-colors">
+                        <>
+                          <tr key={req.id} className="hover:bg-slate-25 transition-colors">
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-3">
                               <AvatarCircle name={req.studentName} />
@@ -307,7 +611,97 @@ export default function Dashboard() {
                             </div>
                           </td>
                           <td className="px-4 py-4 text-xs text-slate-400 hidden sm:table-cell">{req.submittedAt}</td>
-                        </tr>
+                          </tr>
+
+                          {/* Expanded tutors for pending requests */}
+                          {req.status === 'pending' && (
+                            <tr key={req.id + '-expanded'} className="bg-slate-50">
+                              <td colSpan={6} className="px-5 py-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <div className="text-sm text-slate-600">Eligible tutors for <strong className="text-slate-900">{req.studentName}</strong> ({req.subject})</div>
+                                  <div>
+                                    <button
+                                      onClick={() => setExpandedRequestId(prev => prev === req.id ? null : req.id)}
+                                      className="text-xs bg-white border border-slate-200 text-slate-700 px-3 py-1 rounded-lg"
+                                    >
+                                      {expandedRequestId === req.id ? 'Hide' : 'View tutors'}
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {expandedRequestId !== req.id ? null : (
+                                  (() => {
+                                    const elig = tutors
+                                      .filter(t => t.status === 'accepted')
+                                      .map(t => ({
+                                        tutor: t,
+                                        subjectMatch: t.subjects.includes(req.subject),
+                                        overlaps: computeOverlapWithTimezone(req.availability, t.availability),
+                                      }))
+                                      .filter(({ subjectMatch, overlaps }) => subjectMatch || overlaps.length > 0)
+                                      .sort((a, b) => {
+                                        const scoreA = (a.subjectMatch ? 10 : 0) + a.overlaps.length;
+                                        const scoreB = (b.subjectMatch ? 10 : 0) + b.overlaps.length;
+                                        return scoreB - scoreA;
+                                      });
+
+                                    if (elig.length === 0) {
+                                      return (
+                                        <div className="bg-white border border-slate-100 rounded-xl p-6 text-center">
+                                          <p className="text-sm text-slate-400">No eligible tutors — no accepted tutors match both subject and availability (same timezone).</p>
+                                        </div>
+                                      );
+                                    }
+
+                                    return (
+                                      <div className="space-y-3">
+                                        {elig.map(({ tutor, subjectMatch, overlaps }) => (
+                                          <div key={tutor.id} className="bg-white border border-slate-100 rounded-xl p-4 hover:border-slate-200 hover:shadow-sm transition-all">
+                                            <div className="flex items-start gap-3">
+                                              <AvatarCircle name={tutor.name} />
+                                              <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                  <p className="text-sm font-medium text-slate-900">{tutor.name}</p>
+                                                  {subjectMatch && (
+                                                    <span className="text-xs bg-blue-50 text-blue-600 border border-blue-100 px-1.5 py-0.5 rounded-full">Subject match</span>
+                                                  )}
+                                                </div>
+                                                <p className="text-xs text-slate-500 mt-0.5">{tutor.subjects.slice(0, 3).join(', ')}</p>
+                                                <p className="text-xs text-slate-400 mt-0.5">{tutor.experience} · {tzLabel(tutor.timezone)}</p>
+
+                                                {overlaps.length > 0 ? (
+                                                  <OverlapPills overlaps={overlaps} />
+                                                ) : (
+                                                  <p className="mt-1.5 text-xs text-amber-600 flex items-center gap-1">
+                                                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                                                      <path d="M5 3v2.5M5 7h.01" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                                                      <circle cx="5" cy="5" r="4" stroke="currentColor" strokeWidth="1.3"/>
+                                                    </svg>
+                                                    No direct overlapping slots (subject match only)
+                                                  </p>
+                                                )}
+
+                                                <div className="mt-3 flex gap-2">
+                                                  <button
+                                                    onClick={() => assignForRequest(req.id, tutor.id)}
+                                                    disabled={assigningRequestIds.includes(req.id)}
+                                                    className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg disabled:opacity-50"
+                                                  >
+                                                    {assigningRequestIds.includes(req.id) ? 'Assigning…' : 'Assign'}
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </>
                       );
                     })}
                   </tbody>
@@ -338,7 +732,7 @@ export default function Dashboard() {
                 />
               </div>
               <div className="flex gap-1.5 flex-wrap">
-                {(['all', 'active', 'pending', 'inactive'] as const).map(f => (
+                {(['all', 'accepted', 'pending', 'inactive'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setTutorFilter(f)}
@@ -401,9 +795,30 @@ export default function Dashboard() {
                         </td>
                         <td className="px-4 py-4 text-sm text-slate-700 hidden md:table-cell">{tutor.experience}</td>
                         <td className="px-4 py-4">
-                          <span className={`inline-flex items-center border px-2 py-0.5 rounded-full text-xs font-medium ${TUTOR_STATUS_BADGE[tutor.status]}`}>
-                            {tutor.status.charAt(0).toUpperCase() + tutor.status.slice(1)}
-                          </span>
+                          <div className="flex flex-col gap-2">
+                            <span className={`inline-flex items-center border px-2 py-0.5 rounded-full text-xs font-medium ${TUTOR_STATUS_BADGE[tutor.status]}`}>
+                              {tutor.status.charAt(0).toUpperCase() + tutor.status.slice(1)}
+                            </span>
+
+                            {isCoordinator && tutor.status === 'pending' && (
+                              <div className="flex items-center gap-2 mt-1">
+                                <button
+                                  onClick={() => updateTutorStatus(tutor.id, 'accepted')}
+                                  disabled={isUpdating(tutor.id)}
+                                  className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded-lg disabled:opacity-50"
+                                >
+                                  {isUpdating(tutor.id) ? 'Processing…' : 'Approve'}
+                                </button>
+                                <button
+                                  onClick={() => updateTutorStatus(tutor.id, 'rejected')}
+                                  disabled={isUpdating(tutor.id)}
+                                  className="text-xs bg-white border border-slate-200 text-slate-700 px-3 py-1 rounded-lg disabled:opacity-50"
+                                >
+                                  Reject
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -483,9 +898,9 @@ export default function Dashboard() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {eligibleTutors.length === 0 && (
+                      {eligibleTutors.length === 0 && (
                       <div className="bg-white border border-slate-100 rounded-xl py-10 text-center">
-                        <p className="text-sm text-slate-400">No active tutors match this subject and availability.</p>
+                        <p className="text-sm text-slate-400">No accepted tutors match this subject and availability.</p>
                         <p className="mt-1 text-xs text-slate-300">Check the tutors tab or try a different request.</p>
                       </div>
                     )}
