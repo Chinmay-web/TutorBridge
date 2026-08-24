@@ -121,13 +121,18 @@ Required environment variables
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_PUBLISHABLE_KEY`
 
-Screenshots (placeholders)
+## Screenshots
 
-1. Landing page — add screenshot
-2. Coordinator dashboard — add screenshot
-3. Tutor matching panel — add screenshot
+### Landing Page
+![TutorBridge Landing Page](screenshots/landing-page.png)
 
-Future improvements
+### Coordinator Dashboard
+![TutorBridge Coordinator Dashboard](screenshots/coordinator-dashboard.png)
+
+### Tutor Matching
+![TutorBridge Tutor Matching](screenshots/matching-panel.png)
+
+## Future improvements
 
 1. Move matching and assignment logic into server-side Postgres functions or edge server endpoints for atomicity and simplified client code.
 2. Add email/notification workflow for tutors and students upon assignment.
