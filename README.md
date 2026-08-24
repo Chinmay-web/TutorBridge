@@ -6,7 +6,7 @@ TutorBridge — a lightweight tutoring coordination platform prototype that conn
 
 [View the live TutorBridge application](https://tutor-bridge-six.vercel.app/)
 
-One-line: A small full‑stack app for collecting tutoring requests and coordinating volunteer tutors via a Supabase backend.
+Overview: A small full‑stack app for collecting tutoring requests and coordinating volunteer tutors via a Supabase backend.
 
 ## How it works
 
