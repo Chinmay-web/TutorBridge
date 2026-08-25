@@ -70,6 +70,8 @@ REVOKE ALL ON coordinators FROM authenticated;
 REVOKE ALL ON assignments FROM authenticated;
 GRANT SELECT, UPDATE ON tutors TO authenticated;
 GRANT SELECT, UPDATE ON student_requests TO authenticated;
+GRANT INSERT ON tutors TO authenticated;
+GRANT INSERT ON student_requests TO authenticated;
 GRANT SELECT ON coordinators TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON assignments TO authenticated;
 
@@ -80,6 +82,19 @@ CREATE POLICY "Anon insert tutors" ON tutors
     auth.role() = 'anon'
     AND status = 'pending'
     AND email IS NOT NULL
+  );
+
+CREATE POLICY "Coordinators insert tutors" ON tutors
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    auth.uid() IS NOT NULL
+    AND status = 'pending'
+    AND email IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM coordinators
+      WHERE coordinators.user_id = auth.uid()
+        AND coordinators.is_active
+    )
   );
 
 CREATE POLICY "Coordinators select tutors" ON tutors
@@ -112,6 +127,19 @@ CREATE POLICY "Anon insert student_requests" ON student_requests
     auth.role() = 'anon'
     AND status = 'pending'
     AND email IS NOT NULL
+  );
+
+CREATE POLICY "Coordinators insert student_requests" ON student_requests
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    auth.uid() IS NOT NULL
+    AND status = 'pending'
+    AND email IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM coordinators
+      WHERE coordinators.user_id = auth.uid()
+        AND coordinators.is_active
+    )
   );
 
 CREATE POLICY "Coordinators select student_requests" ON student_requests
@@ -205,3 +233,36 @@ CREATE POLICY "Coordinators delete assignments" ON assignments
 -- * Assignments are managed only by authenticated coordinators.
 -- * The coordinators table is only readable by the coordinator user for their own row.
 -- * assigned_at and created_at are database-generated timestamps and should not be set by client UI.
+
+-- 11) Separate additive patch for an existing database
+-- Run only this section in the Supabase SQL editor when the tables already exist.
+-- It does not recreate tables or alter existing policies.
+--
+-- GRANT INSERT ON tutors TO authenticated;
+-- GRANT INSERT ON student_requests TO authenticated;
+--
+-- CREATE POLICY "Coordinators insert tutors" ON tutors
+--   FOR INSERT TO authenticated
+--   WITH CHECK (
+--     auth.uid() IS NOT NULL
+--     AND status = 'pending'
+--     AND email IS NOT NULL
+--     AND EXISTS (
+--       SELECT 1 FROM coordinators
+--       WHERE coordinators.user_id = auth.uid()
+--         AND coordinators.is_active
+--     )
+--   );
+--
+-- CREATE POLICY "Coordinators insert student_requests" ON student_requests
+--   FOR INSERT TO authenticated
+--   WITH CHECK (
+--     auth.uid() IS NOT NULL
+--     AND status = 'pending'
+--     AND email IS NOT NULL
+--     AND EXISTS (
+--       SELECT 1 FROM coordinators
+--       WHERE coordinators.user_id = auth.uid()
+--         AND coordinators.is_active
+--     )
+--   );

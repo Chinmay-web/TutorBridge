@@ -8,9 +8,13 @@ import {
 } from '../data/mockData';
 import { formatTime, formatSlot, TIMEZONES } from '../components/AvailabilityPicker';
 
-type Tab = 'requests' | 'tutors' | 'matching';
+type Tab = 'requests' | 'tutors' | 'matching' | 'assignments';
 type RequestStatus = StudentRequest['status'];
 type TutorStatus = Tutor['status'];
+
+interface DashboardProps {
+  onSignedOut: () => void;
+}
 
 type DbStudentRequest = {
   id: string;
@@ -35,6 +39,30 @@ type DbTutor = {
   bio: string | null;
   status: TutorStatus;
   created_at: string;
+};
+
+type Assignment = {
+  id: string;
+  studentName: string;
+  studentEmail: string;
+  tutorName: string;
+  tutorEmail: string;
+  subject: string;
+  assignedAt: string;
+};
+
+type DbAssignment = {
+  id: string;
+  assigned_at: string;
+  student_requests: {
+    name: string;
+    email: string;
+    subject: string;
+  } | null;
+  tutors: {
+    name: string;
+    email: string;
+  } | null;
 };
 
 const STATUS_BADGE: Record<RequestStatus, string> = {
@@ -149,10 +177,11 @@ function computeOverlapWithTimezone(a: TimeSlot[], b: TimeSlot[]) {
   return result;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ onSignedOut }: DashboardProps) {
   const [tab, setTab] = useState<Tab>('requests');
   const [requests, setRequests] = useState<StudentRequest[]>([]);
   const [tutors, setTutors] = useState<Tutor[]>([]);
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [userChecked, setUserChecked] = useState(false);
@@ -169,6 +198,24 @@ export default function Dashboard() {
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const lastUpdated = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const [assigningRequestIds, setAssigningRequestIds] = useState<string[]>([]);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState('');
+
+  const handleSignOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutError('');
+
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error('Coordinator sign-out error:', error);
+      setSignOutError('Unable to sign out. Please try again.');
+      setSigningOut(false);
+      return;
+    }
+
+    onSignedOut();
+  };
 
   useEffect(() => {
     // Check auth state and coordinator membership first
@@ -220,15 +267,17 @@ export default function Dashboard() {
       setLoading(true);
       setLoadError('');
 
-      const [requestsResponse, tutorsResponse] = await Promise.all([
+      const [requestsResponse, tutorsResponse, assignmentsResponse] = await Promise.all([
         supabase.from<DbStudentRequest>('student_requests')
           .select('id,name,email,phone,grade_level,subject,availability,additional_info,status,created_at'),
         supabase.from<DbTutor>('tutors')
           .select('id,name,email,phone,subjects,availability,bio,status,created_at'),
+        supabase.from<DbAssignment>('assignments')
+          .select('id,assigned_at,student_requests(name,email,subject),tutors(name,email)'),
       ]);
 
-      if (requestsResponse.error || tutorsResponse.error) {
-        console.error('Dashboard Supabase read errors:', requestsResponse.error, tutorsResponse.error);
+      if (requestsResponse.error || tutorsResponse.error || assignmentsResponse.error) {
+        console.error('Dashboard Supabase read errors:', requestsResponse.error, tutorsResponse.error, assignmentsResponse.error);
         setLoadError('Unable to load dashboard data.');
         setLoading(false);
         return;
@@ -260,6 +309,16 @@ export default function Dashboard() {
         bio: row.bio ?? '',
         status: row.status,
         joinedAt: row.created_at,
+      })));
+
+      setAssignments((assignmentsResponse.data ?? []).map(row => ({
+        id: row.id,
+        studentName: row.student_requests?.name ?? 'Unknown student',
+        studentEmail: row.student_requests?.email ?? 'Unavailable',
+        tutorName: row.tutors?.name ?? 'Unknown tutor',
+        tutorEmail: row.tutors?.email ?? 'Unavailable',
+        subject: row.student_requests?.subject ?? 'Unavailable',
+        assignedAt: row.assigned_at,
       })));
 
       setLoading(false);
@@ -410,6 +469,18 @@ export default function Dashboard() {
 
         // Success: update local UI
         setRequests(prev => prev.map(r => r.id === requestId ? { ...r, status: normalizeRequestStatus('assigned'), matchedTutorId: tutorId } : r));
+        setAssignments(prev => [
+          {
+            id: (assignData as { id?: string } | null)?.id ?? `${requestId}-${tutorId}`,
+            studentName: req.studentName,
+            studentEmail: req.email,
+            tutorName: tutor?.name ?? 'Unknown tutor',
+            tutorEmail: tutor?.email ?? 'Unavailable',
+            subject: req.subject,
+            assignedAt: (assignData as { assigned_at?: string } | null)?.assigned_at ?? new Date().toISOString(),
+          },
+          ...prev,
+        ]);
         setMatchSuccess({ student: req.studentName, tutor: tutor?.name ?? '' });
         setExpandedRequestId(null);
         setTimeout(() => setMatchSuccess(null), 4000);
@@ -443,6 +514,14 @@ export default function Dashboard() {
             <span className="text-xs text-slate-400 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
               Last updated: {lastUpdated}
             </span>
+            <button
+              onClick={handleSignOut}
+              disabled={signingOut}
+              className="text-sm font-medium text-slate-600 hover:text-slate-900 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors disabled:opacity-50"
+            >
+              {signingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+            {signOutError && <p className="text-xs text-rose-600">{signOutError}</p>}
           </div>
 
           {/* Stats */}
@@ -507,7 +586,7 @@ export default function Dashboard() {
 
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-100 p-1 rounded-xl w-fit mb-6" role="tablist" aria-label="Dashboard sections">
-          {(['requests', 'tutors', 'matching'] as Tab[]).map(t => (
+          {(['requests', 'tutors', 'matching', 'assignments'] as Tab[]).map(t => (
             <button
               key={t}
               role="tab"
@@ -515,7 +594,7 @@ export default function Dashboard() {
               onClick={() => setTab(t)}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${tab === t ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              {t === 'matching' ? 'Match Students' : t === 'requests' ? 'Requests' : 'Tutors'}
+              {t === 'matching' ? 'Match Students' : t === 'requests' ? 'Requests' : t === 'tutors' ? 'Tutors' : 'Assignments'}
             </button>
           ))}
         </div>
@@ -828,6 +907,66 @@ export default function Dashboard() {
               </div>
               <div className="px-5 py-3 border-t border-slate-50 bg-slate-25">
                 <p className="text-xs text-slate-400">{filteredTutors.length} of {tutors.length} tutors</p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ── Assignments tab ── */}
+        {tab === 'assignments' && (
+          <section aria-label="Assignments">
+            <div className="mb-4">
+              <h2 className="font-display font-semibold text-base text-slate-900">Persistent assignments</h2>
+              <p className="mt-0.5 text-sm text-slate-500">Review student and tutor pairings created by coordinators.</p>
+            </div>
+
+            <div className="bg-white border border-slate-100 rounded-2xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px]" aria-label="Assignments table">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-25">
+                      <th className="text-left text-xs font-semibold text-slate-500 px-5 py-3.5">Student</th>
+                      <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Tutor</th>
+                      <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Subject</th>
+                      <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Assigned date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {assignments.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="text-center py-12 text-sm text-slate-400">No assignments yet.</td>
+                      </tr>
+                    ) : assignments.map(assignment => (
+                      <tr key={assignment.id} className="hover:bg-slate-25 transition-colors">
+                        <td className="px-5 py-4">
+                          <div className="flex items-center gap-3">
+                            <AvatarCircle name={assignment.studentName} />
+                            <div>
+                              <p className="text-sm font-medium text-slate-900">{assignment.studentName}</p>
+                              <p className="text-xs text-slate-400">{assignment.studentEmail}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4">
+                          <div className="flex items-center gap-3">
+                            <AvatarCircle name={assignment.tutorName} />
+                            <div>
+                              <p className="text-sm font-medium text-slate-900">{assignment.tutorName}</p>
+                              <p className="text-xs text-slate-400">{assignment.tutorEmail}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 text-sm text-slate-700">{assignment.subject}</td>
+                        <td className="px-4 py-4 text-sm text-slate-500">
+                          {new Date(assignment.assignedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="px-5 py-3 border-t border-slate-50 bg-slate-25">
+                <p className="text-xs text-slate-400">{assignments.length} assignment{assignments.length !== 1 ? 's' : ''}</p>
               </div>
             </div>
           </section>

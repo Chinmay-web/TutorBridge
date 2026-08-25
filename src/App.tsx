@@ -134,5 +134,5 @@ function CoordinatorGate({ onNavigate }: { onNavigate: (p: string) => void }) {
     );
   }
 
-  return <Dashboard />;
+  return <Dashboard onSignedOut={() => setReload(r => r + 1)} />;
 }
