@@ -1077,10 +1077,11 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
                             </div>
                           </div>
                           <button
-                            onClick={() => handleAssign(tutor.id)}
-                            className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
+                            onClick={() => assignForRequest(selectedRequest.id, tutor.id)}
+                            disabled={assigningRequestIds.includes(selectedRequest.id)}
+                            className="flex-shrink-0 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
                           >
-                            Assign
+                            {assigningRequestIds.includes(selectedRequest.id) ? 'Assigning…' : 'Assign'}
                           </button>
                         </div>
                       </div>

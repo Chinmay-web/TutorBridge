@@ -98,8 +98,4 @@ pnpm dev
 
 ## Project status
 
-<<<<<<< HEAD
-TutorBridge is a functional prototype built for learning and portfolio demonstration.
-=======
 TutorBridge is a functional prototype demonstrating an end-to-end tutoring coordination workflow.
->>>>>>> 74a5af9 (Clean up TutorBridge README)
