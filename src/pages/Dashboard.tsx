@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   computeOverlap,
@@ -11,6 +11,8 @@ import { formatTime, formatSlot, TIMEZONES } from '../components/AvailabilityPic
 type Tab = 'requests' | 'tutors' | 'matching' | 'assignments';
 type RequestStatus = StudentRequest['status'];
 type TutorStatus = Tutor['status'];
+type IssueType = 'one_time_cancellation' | 'schedule_change' | 'needs_rematch';
+type IssueReportedBy = 'student' | 'tutor';
 
 interface DashboardProps {
   onSignedOut: () => void;
@@ -43,17 +45,29 @@ type DbTutor = {
 
 type Assignment = {
   id: string;
+  requestId: string;
   studentName: string;
   studentEmail: string;
   tutorName: string;
   tutorEmail: string;
   subject: string;
   assignedAt: string;
+  issueType: IssueType | null;
+  issueReportedBy: IssueReportedBy | null;
+  issueNote: string | null;
+  issueReportedAt: string | null;
+  isActive: boolean;
 };
 
 type DbAssignment = {
   id: string;
+  request_id: string;
   assigned_at: string;
+  issue_type: IssueType | null;
+  issue_reported_by: IssueReportedBy | null;
+  issue_note: string | null;
+  issue_reported_at: string | null;
+  is_active: boolean;
   student_requests: {
     name: string;
     email: string;
@@ -198,6 +212,11 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const lastUpdated = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   const [assigningRequestIds, setAssigningRequestIds] = useState<string[]>([]);
+  const [editingAssignmentId, setEditingAssignmentId] = useState<string | null>(null);
+  const [issueType, setIssueType] = useState<IssueType>('one_time_cancellation');
+  const [issueReportedBy, setIssueReportedBy] = useState<IssueReportedBy>('student');
+  const [issueNote, setIssueNote] = useState('');
+  const [savingAssignmentIds, setSavingAssignmentIds] = useState<string[]>([]);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState('');
 
@@ -273,7 +292,7 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
         supabase.from<DbTutor>('tutors')
           .select('id,name,email,phone,subjects,availability,bio,status,created_at'),
         supabase.from<DbAssignment>('assignments')
-          .select('id,assigned_at,student_requests(name,email,subject),tutors(name,email)'),
+          .select('id,request_id,assigned_at,issue_type,issue_reported_by,issue_note,issue_reported_at,is_active,student_requests(name,email,subject),tutors(name,email)'),
       ]);
 
       if (requestsResponse.error || tutorsResponse.error || assignmentsResponse.error) {
@@ -313,12 +332,18 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
 
       setAssignments((assignmentsResponse.data ?? []).map(row => ({
         id: row.id,
+        requestId: row.request_id,
         studentName: row.student_requests?.name ?? 'Unknown student',
         studentEmail: row.student_requests?.email ?? 'Unavailable',
         tutorName: row.tutors?.name ?? 'Unknown tutor',
         tutorEmail: row.tutors?.email ?? 'Unavailable',
         subject: row.student_requests?.subject ?? 'Unavailable',
         assignedAt: row.assigned_at,
+        issueType: row.issue_type,
+        issueReportedBy: row.issue_reported_by,
+        issueNote: row.issue_note,
+        issueReportedAt: row.issue_reported_at,
+        isActive: row.is_active,
       })));
 
       setLoading(false);
@@ -392,15 +417,6 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
         })
     : [];
 
-  const handleAssign = (tutorId: string) => {
-    if (!selectedRequest) return;
-    const tutor = tutors.find(t => t.id === tutorId);
-    setRequests(prev => prev.map(r => r.id === selectedRequest.id ? { ...r, status: 'matched', matchedTutorId: tutorId } : r));
-    setMatchSuccess({ student: selectedRequest.studentName, tutor: tutor?.name ?? '' });
-    setSelectedRequestId(null);
-    setTimeout(() => setMatchSuccess(null), 4000);
-  };
-
   const assignForRequest = (requestId: string, tutorId: string) => {
     if (assigningRequestIds.includes(requestId)) return;
     setUpdateError('');
@@ -418,6 +434,17 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
 
     (async () => {
       let createdAssignmentId: string | null = null;
+      let reusedAssignment: {
+        id: string;
+        tutor_id: string | null;
+        assigned_by: string;
+        assigned_at: string;
+        issue_type: IssueType | null;
+        issue_reported_by: IssueReportedBy | null;
+        issue_note: string | null;
+        issue_reported_at: string | null;
+        is_active: boolean;
+      } | null = null;
       try {
         // Get current authenticated user
         const { data: userData, error: userErr } = await supabase.auth.getUser();
@@ -428,12 +455,49 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
           return;
         }
 
-        // 1) Insert assignment row with assigned_by set to the current user's id
-        const { data: assignData, error: assignErr } = await supabase
+        // Reuse an existing row because assignments.request_id is unique.
+        const { data: existingAssignment, error: existingErr } = await supabase
           .from('assignments')
-          .insert({ request_id: requestId, tutor_id: tutorId, assigned_by: currentUser.id })
-          .select()
+          .select('id,tutor_id,assigned_by,assigned_at,issue_type,issue_reported_by,issue_note,issue_reported_at,is_active')
+          .eq('request_id', requestId)
           .maybeSingle();
+
+        if (existingErr) {
+          console.error('Existing assignment lookup error:', existingErr);
+          setUpdateError('Unable to check for an existing assignment. Please try again.');
+          return;
+        }
+
+        reusedAssignment = existingAssignment;
+
+        if (existingAssignment?.is_active) {
+          setUpdateError('This request already has an active assignment.');
+          return;
+        }
+
+        const assignmentPayload = {
+          tutor_id: tutorId,
+          assigned_by: currentUser.id,
+          assigned_at: new Date().toISOString(),
+          is_active: true,
+          issue_type: null,
+          issue_reported_by: null,
+          issue_note: null,
+          issue_reported_at: null,
+        };
+
+        const { data: assignData, error: assignErr } = existingAssignment
+          ? await supabase
+              .from('assignments')
+              .update(assignmentPayload)
+              .eq('id', existingAssignment.id)
+              .select()
+              .maybeSingle()
+          : await supabase
+              .from('assignments')
+              .insert({ request_id: requestId, ...assignmentPayload })
+              .select()
+              .maybeSingle();
 
         if (assignErr) {
           console.error('Assignment insert error:', assignErr);
@@ -441,7 +505,7 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
           return;
         }
 
-        createdAssignmentId = (assignData as any)?.id ?? null;
+        createdAssignmentId = (assignData as { id?: string } | null)?.id ?? null;
 
         // 2) Update request status to 'assigned'
         const { data: reqData, error: reqErr } = await supabase
@@ -455,8 +519,23 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
           console.error('Student request update error after assignment:', reqErr);
           setUpdateError('Assignment created but failed to update request status. Rolling back.');
 
-          // Rollback: delete the assignment we just created
-          if (createdAssignmentId) {
+          // Roll back a new row by deleting it, or restore the reused row.
+          if (reusedAssignment) {
+            const { error: restoreErr } = await supabase
+              .from('assignments')
+              .update({
+                tutor_id: reusedAssignment.tutor_id,
+                assigned_by: reusedAssignment.assigned_by,
+                assigned_at: reusedAssignment.assigned_at,
+                issue_type: reusedAssignment.issue_type,
+                issue_reported_by: reusedAssignment.issue_reported_by,
+                issue_note: reusedAssignment.issue_note,
+                issue_reported_at: reusedAssignment.issue_reported_at,
+                is_active: reusedAssignment.is_active,
+              })
+              .eq('id', reusedAssignment.id);
+            if (restoreErr) console.error('Failed to restore reused assignment:', restoreErr);
+          } else if (createdAssignmentId) {
             const { error: delErr } = await supabase
               .from('assignments')
               .delete()
@@ -472,14 +551,20 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
         setAssignments(prev => [
           {
             id: (assignData as { id?: string } | null)?.id ?? `${requestId}-${tutorId}`,
+            requestId,
             studentName: req.studentName,
             studentEmail: req.email,
             tutorName: tutor?.name ?? 'Unknown tutor',
             tutorEmail: tutor?.email ?? 'Unavailable',
             subject: req.subject,
             assignedAt: (assignData as { assigned_at?: string } | null)?.assigned_at ?? new Date().toISOString(),
+            issueType: null,
+            issueReportedBy: null,
+            issueNote: null,
+            issueReportedAt: null,
+            isActive: true,
           },
-          ...prev,
+          ...prev.filter(assignment => assignment.id !== ((assignData as { id?: string } | null)?.id ?? `${requestId}-${tutorId}`)),
         ]);
         setMatchSuccess({ student: req.studentName, tutor: tutor?.name ?? '' });
         setExpandedRequestId(null);
@@ -499,6 +584,94 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
         setAssigningRequestIds(prev => prev.filter(x => x !== requestId));
       }
     })();
+  };
+
+  const saveAssignmentIssue = async (assignment: Assignment) => {
+    if (savingAssignmentIds.includes(assignment.id)) return;
+    setUpdateError('');
+    setSavingAssignmentIds(prev => [...prev, assignment.id]);
+
+    const previousAssignment = { ...assignment };
+    const issueReportedAt = new Date().toISOString();
+    const isRematch = issueType === 'needs_rematch';
+
+    try {
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      const currentUser = userData?.user ?? null;
+      if (userError || !currentUser) {
+        console.error('No authenticated user for assignment issue update:', userError);
+        setUpdateError('You must be signed in as an active coordinator to manage an issue.');
+        return;
+      }
+
+      const { error: assignmentError } = await supabase
+        .from('assignments')
+        .update({
+          assigned_by: currentUser.id,
+          issue_type: issueType,
+          issue_reported_by: issueReportedBy,
+          issue_note: issueNote.trim() || null,
+          issue_reported_at: issueReportedAt,
+          is_active: !isRematch,
+        })
+        .eq('id', assignment.id);
+
+      if (assignmentError) {
+        console.error('Assignment issue update error:', assignmentError);
+        setUpdateError('Unable to save the assignment issue. Please try again.');
+        return;
+      }
+
+      if (isRematch) {
+        const { error: requestError } = await supabase
+          .from('student_requests')
+          .update({ status: 'pending' })
+          .eq('id', assignment.requestId);
+
+        if (requestError) {
+          console.error('Rematch request update error:', requestError);
+          const { error: rollbackError } = await supabase
+            .from('assignments')
+            .update({
+              assigned_by: currentUser.id,
+              issue_type: previousAssignment.issueType,
+              issue_reported_by: previousAssignment.issueReportedBy,
+              issue_note: previousAssignment.issueNote,
+              issue_reported_at: previousAssignment.issueReportedAt,
+              is_active: previousAssignment.isActive,
+            })
+            .eq('id', assignment.id);
+          if (rollbackError) console.error('Rematch assignment rollback error:', rollbackError);
+          setUpdateError('Unable to return the student to matching. The assignment was rolled back.');
+          return;
+        }
+      }
+
+      setAssignments(prev => prev.map(item => item.id === assignment.id ? {
+        ...item,
+        issueType,
+        issueReportedBy,
+        issueNote: issueNote.trim() || null,
+        issueReportedAt,
+        isActive: !isRematch,
+      } : item));
+
+      if (isRematch) {
+        setRequests(prev => prev.map(request => request.id === assignment.requestId ? {
+          ...request,
+          status: 'pending',
+          matchedTutorId: undefined,
+        } : request));
+      }
+
+      setEditingAssignmentId(null);
+      setIssueNote('');
+    } catch (error) {
+      console.error('Assignment issue operation exception:', error);
+      setUpdateError('Unable to save the assignment issue. Please try again.');
+    } finally {
+      setSavingAssignmentIds(prev => prev.filter(id => id !== assignment.id));
+    }
   };
 
   return (
@@ -920,6 +1093,12 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
               <p className="mt-0.5 text-sm text-slate-500">Review student and tutor pairings created by coordinators.</p>
             </div>
 
+            {updateError && (
+              <div className="mb-4 bg-rose-50 border border-rose-200 rounded-2xl p-4 text-rose-700">
+                {updateError}
+              </div>
+            )}
+
             <div className="bg-white border border-slate-100 rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[760px]" aria-label="Assignments table">
@@ -929,6 +1108,8 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
                       <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Tutor</th>
                       <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Subject</th>
                       <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Assigned date</th>
+                      <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Status</th>
+                      <th className="text-left text-xs font-semibold text-slate-500 px-4 py-3.5">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
@@ -937,6 +1118,7 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
                         <td colSpan={4} className="text-center py-12 text-sm text-slate-400">No assignments yet.</td>
                       </tr>
                     ) : assignments.map(assignment => (
+                      <Fragment key={assignment.id}>
                       <tr key={assignment.id} className="hover:bg-slate-25 transition-colors">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
@@ -960,7 +1142,68 @@ export default function Dashboard({ onSignedOut }: DashboardProps) {
                         <td className="px-4 py-4 text-sm text-slate-500">
                           {new Date(assignment.assignedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                         </td>
+                        <td className="px-4 py-4">
+                          <div className="flex flex-col gap-1">
+                            <span className={`inline-flex w-fit items-center border px-2 py-0.5 rounded-full text-xs font-medium ${assignment.isActive ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                              {assignment.isActive ? 'Active' : 'Needs Rematch / Inactive'}
+                            </span>
+                            {assignment.issueType && (
+                              <span className="text-xs text-amber-700">
+                                {assignment.issueType === 'one_time_cancellation' ? 'One-time cancellation' : assignment.issueType === 'schedule_change' ? 'Schedule change' : 'Needs rematch'}
+                              </span>
+                            )}
+                            {assignment.issueNote && <span className="text-xs text-slate-400">{assignment.issueNote}</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-4">
+                          <button
+                            onClick={() => {
+                              setEditingAssignmentId(assignment.id);
+                              setIssueType(assignment.issueType ?? 'one_time_cancellation');
+                              setIssueReportedBy(assignment.issueReportedBy ?? 'student');
+                              setIssueNote(assignment.issueNote ?? '');
+                              setUpdateError('');
+                            }}
+                            className="text-xs bg-white border border-slate-200 text-slate-700 px-3 py-1.5 rounded-lg hover:bg-slate-50"
+                          >
+                            Manage issue
+                          </button>
+                        </td>
                       </tr>
+                      {editingAssignmentId === assignment.id && (
+                        <tr key={`${assignment.id}-editor`} className="bg-slate-50">
+                          <td colSpan={6} className="px-5 py-4">
+                            <div className="grid gap-3 sm:grid-cols-3 items-end">
+                              <label className="text-xs font-medium text-slate-600">
+                                Issue type
+                                <select value={issueType} onChange={event => setIssueType(event.target.value as IssueType)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800">
+                                  <option value="one_time_cancellation">One-time cancellation</option>
+                                  <option value="schedule_change">Schedule change</option>
+                                  <option value="needs_rematch">Needs rematch</option>
+                                </select>
+                              </label>
+                              <label className="text-xs font-medium text-slate-600">
+                                Reported by
+                                <select value={issueReportedBy} onChange={event => setIssueReportedBy(event.target.value as IssueReportedBy)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800">
+                                  <option value="student">Student</option>
+                                  <option value="tutor">Tutor</option>
+                                </select>
+                              </label>
+                              <label className="text-xs font-medium text-slate-600">
+                                Short note
+                                <input value={issueNote} onChange={event => setIssueNote(event.target.value)} maxLength={300} placeholder="Add a note" className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800" />
+                              </label>
+                            </div>
+                            <div className="mt-3 flex justify-end gap-2">
+                              <button onClick={() => setEditingAssignmentId(null)} className="text-xs border border-slate-200 bg-white text-slate-700 px-3 py-1.5 rounded-lg">Cancel</button>
+                              <button onClick={() => saveAssignmentIssue(assignment)} disabled={savingAssignmentIds.includes(assignment.id)} className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg disabled:opacity-50">
+                                {savingAssignmentIds.includes(assignment.id) ? 'Saving…' : 'Save issue'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>

@@ -47,6 +47,11 @@ CREATE TABLE assignments (
   assigned_by uuid NOT NULL REFERENCES coordinators(user_id),
   assigned_at timestamptz DEFAULT now(),
   notes text,
+  issue_type text CHECK (issue_type IN ('one_time_cancellation','schedule_change','needs_rematch')),
+  issue_reported_by text CHECK (issue_reported_by IN ('student','tutor')),
+  issue_note text,
+  issue_reported_at timestamptz,
+  is_active boolean NOT NULL DEFAULT true,
   CONSTRAINT one_assignment_per_request UNIQUE (request_id)
 );
 
@@ -234,7 +239,20 @@ CREATE POLICY "Coordinators delete assignments" ON assignments
 -- * The coordinators table is only readable by the coordinator user for their own row.
 -- * assigned_at and created_at are database-generated timestamps and should not be set by client UI.
 
--- 11) Separate additive patch for an existing database
+-- 11) Additive assignment issue fields for an existing database
+-- Run only this section when the assignments table already exists.
+-- No new RLS policy or grant is required. Authenticated coordinators already
+-- have UPDATE privilege; the frontend includes the current coordinator in
+-- assigned_by to satisfy the existing assignment UPDATE policy.
+--
+-- ALTER TABLE assignments
+--   ADD COLUMN issue_type text CHECK (issue_type IN ('one_time_cancellation','schedule_change','needs_rematch')),
+--   ADD COLUMN issue_reported_by text CHECK (issue_reported_by IN ('student','tutor')),
+--   ADD COLUMN issue_note text,
+--   ADD COLUMN issue_reported_at timestamptz,
+--   ADD COLUMN is_active boolean NOT NULL DEFAULT true;
+
+-- 12) Separate additive patch for an existing database
 -- Run only this section in the Supabase SQL editor when the tables already exist.
 -- It does not recreate tables or alter existing policies.
 --
